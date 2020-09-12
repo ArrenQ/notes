@@ -120,23 +120,74 @@ DispatcherServlet.initXXX说明：所有这些组件都会通过加载完成后�
     javax.inject.Named 实现 JSR-330
     
 4、 refresh() 中执行 postProcessBeanFactory，将继续添加某些 WebApplicationContextServletContextAwareProcessor 到BeanProcessor集合中，但不在BeanDefinitionMap中
-5、 invokeBeanFactoryPostProcessors
+5、 流程 -> 
     
     内部调用 processConfigBeanDefinitions
     找到符合条件的 spring 配置进行加载 
     判断条件为 ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)
     此时会找到用户的根配置对象，
-    并调用 ConfigurationClassParser.parse 来解析 @Configuration 注解的对象，解析过程如下
+    并调用 ConfigurationClassParser.parse 来解析 @Configuration 注解的对象，解析代码如下
+    
+    
+    AbstractApplicationContext
+        refresh() -> @515
+            invokeBeanFactoryPostProcessors(beanFactory) ->  :531
+               PostProcessorRegistrationDelegate.invokeBeanFactoryPostProcessors -> :705 
+    PostProcessorRegistrationDelegate
+        invokeBeanFactoryPostProcessors(beanFactory, getBeanFactoryPostProcessors()) -> @55
+            invokeBeanDefinitionRegistryPostProcessors(curren, registry) -> :95
+               postProcessor.postProcessBeanDefinitionRegistry(registry) -> :275
+    ConfigurationClassPostProcessor
+        postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) -> :220
+            processConfigBeanDefinitions(registry) ->: 232
+                ConfigurationClassParser.parse(candidates);  -> 315
+                
+                #ConfigurationClassBeanDefinitionReader.loadBeanDefinitions();  -> 327 // parse完成后调用这个流程 AAA
+    
+    ConfigurationClassParser
+        parse(Set<BeanDefinitionHolder> configCandidates) -> @162
+            parse() -> :167
+                processConfigurationClass() -> :199
+                    doProcessConfigurationClass() -> :242
+                      
+    解析过程如下：                
+    创建一个sourceConfig 存放扫描到的类和 @Bean方法
         a. 判断配置文件是否是为 @Component （true） ,如果为true，则查找其是否存在 memberClass(递归处理任何成员（嵌套）类)
+                    
+                    这里存在递归
         b. 处理所有 @PropertySource annotations
-        c. 处理 @ComponentScan annotations 获取所有扫描到的Bean，
-            并对所有扫描到的Bean进行 ConfigurationClassParser.parse。 这里存在递归
-        d. 处理所有 @import，并对所有import进行解析，这里存在递归
-        e. 处理所有 @Bean methods
-        f. 处理所有 interfaces上的默认方法
-        g. 处理所有 父类
+                    这里存在递归
+        c. 处理 @ComponentScan annotations 获取所有扫描到的Bean，先找其他内涵有@ComponentScan注解的注解 
+                    这里存在递归
+        d. 处理所有 @import，并对所有import进行解析，包含所有内置有@Import的注解（按申明顺序从上到下加载）
+            注意：是先找其他声明中包含的@Import或编码方式的import（ImportSelector， ImportBeanDefinitionRegistrar），
+                 再找@Import注解 ，如果Import导入的配置类实现的是 DeferredImportSelector 则在parse完成后调用接口加载。
+                    这里存在递归
+        e. 处理所有 @ImportResource ， 
+                    这里存在递归
+        e. 处理所有 @Bean methods 
+        f. 处理所有 interfaces 上的 @Bean methods
+        g. 处理所有 父类 的 @Bean methods
     因为存在递归，且@Bean methods相对于其他加载方式是最后加载的，所有本项目中 SpringMvcConfig 里面的对象是最后加载的。        
     
+    最后parse内部调用 DeferredImportSelectorHandler.process(); 
+    执行所有 DeferredImportSelector 实现
+    先执行 DeferredImportSelector.Group的 process() 获取所有工厂文件中的autoconfig，然后通过selectImports进行排序。
+    这个加载过程重复parse的过程。
     
-    SpringMvcConfig(用户入口配置)
-    SharedMetadataReaderFactoryContextInitializer$SharedMetadataReaderFactoryBean  -> FactoryBean
+    由于 AutoConfiguration 都是通过 EnableAutoConfiguration 委托 AutoConfigurationImportSelector 加载。
+    而 AutoConfigurationImportSelector 正是一个 DeferredImportSelector，所以在这时才对所有 工厂文件中的 AutoConfiguration进行加载
+    
+    AAA.以上步骤 parser.parse() 完成后，通过reader加载BeanDefinition
+    
+    BBB. 加载完所有BeanDefinition 后开始创建对象
+        当refresh完成后，会调用发射 onRefresh 事件，此时开始创建Server，当Servlet容器启动后，会调用onStartup.
+        在startup中会通过BeanDefinition实例化所有对象。同时调用一些特定接口的实现，如 WebMvcConfigurer 的接口。
+        
+        
+        
+        
+### security 
+1. 登录成功 调用 AuthenticationSuccessHandler，默认实现 SavedRequestAwareAuthenticationSuccessHandler
+2. 登录失败 调用 AuthenticationFailureHandler  默认实现 SimpleUrlAuthenticationFailureHandler
+    以上由 UsernamePasswordAuthenticationFilter -> AbstractAuthenticationProcessingFilter 来确认。
